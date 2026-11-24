@@ -24,6 +24,9 @@ import java.util.List;
  */
 final class GcmDb {
 
+    /** v1.3 用的固定路径，保持第一优先 */
+    private static final String DEFAULT_PATH = "/data/data/com.google.android.gms/databases/gcmstatus";
+
     /** 可能出现 gcmstatus 的包名，按可能性排序 */
     private static final String[] PKGS = {
             "com.google.android.gms",
@@ -45,6 +48,15 @@ final class GcmDb {
         if (cachedPath != null) {
             return cachedPath;
         }
+        // 第一优先：v1.3 用的固定路径，判断方式也照旧（ls 成功且输出里有这个路径）
+        if (existsLikeV13(DEFAULT_PATH)) {
+            cachedPath = DEFAULT_PATH;
+            return cachedPath;
+        }
+
+        // 兜底：换个包名 / 文件名再找（各发行版可能改包名）
+        // 命令末尾一定要有 true：最后一条 [ -f ] 失败会把整条命令的退出码变成 1，
+        // 而命中行已经打在 stdout 里了，不该因为退出码被丢掉。
         StringBuilder cmd = new StringBuilder();
         for (String pkg : PKGS) {
             for (String name : DB_NAMES) {
@@ -52,10 +64,8 @@ final class GcmDb {
                         .append("' ] && echo '").append(pkg).append('/').append(name).append("'; ");
             }
         }
+        cmd.append("true");
         RootShell.Result r = RootShell.run(cmd.toString());
-        if (!r.ok()) {
-            return null;
-        }
         String best = null;
         for (String line : r.text().split("\n")) {
             String s = line.trim();
@@ -76,6 +86,11 @@ final class GcmDb {
         return cachedPath;
     }
 
+    private static boolean existsLikeV13(String p) {
+        RootShell.Result r = RootShell.run("ls -l '" + p + "' 2>/dev/null");
+        return r.ok() && r.text().contains(p);
+    }
+
     /** 库文件是否已经生成（microG 从没收到过推送时，这个文件可能还不存在） */
     static boolean dbExists() {
         return path() != null;
@@ -84,6 +99,7 @@ final class GcmDb {
     /**
      * 数据库签名，用于判断有没有变化。
      * 优先看 -wal（microG 开了 WAL），它每次写入都会变。
+     * 只看 stdout，不看退出码：-wal 不存在时 stat 会返回非 0，但主库那行仍然有效。
      */
     static String stamp() {
         String p = path();
@@ -92,10 +108,7 @@ final class GcmDb {
         }
         RootShell.Result r = RootShell.run(
                 "stat -c '%Y:%s' '" + p + "-wal' 2>/dev/null; "
-                        + "stat -c '%Y:%s' '" + p + "' 2>/dev/null");
-        if (!r.ok()) {
-            return "";
-        }
+                        + "stat -c '%Y:%s' '" + p + "' 2>/dev/null; true");
         return r.text().trim();
     }
 
@@ -112,7 +125,7 @@ final class GcmDb {
             if (msg.length() > 0) {
                 sb.append(" · ").append(clip(msg, 70));
             }
-            sb.append("\n点这里可重新检测（会弹 su）");
+            sb.append("\n弹窗里点「允许」；3 秒后会自动重测，也可以点这行手动重测");
             return sb.toString();
         }
         sb.append("root：已授权");

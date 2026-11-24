@@ -25,14 +25,20 @@ database.noteAppMessage(msg.category, DataMessageStanza.ADAPTER.encodedSize(msg)
 - 不启动微信，微信可以一直冻着
 - 拿不到消息内容（`app_data` 是密文），只能提示「有新消息」
 
+## v1.5 变化（修 v1.4 读不到列表）
+
+**根因**：v1.4 的多包名探测把「shell 退出码」当成了「su 是否成功」。命令末尾最后一个 `[ -f ]` 不成立 → 退出码 1 → 已经命中并打在 stdout 里的路径被整条丢弃。
+
+- 改回 v1.3 的固定路径优先：`/data/data/com.google.android.gms/databases/gcmstatus`，判断方式与 v1.3 一致
+- 多包名探测降到兜底，命令末尾加 `true`，只解析 stdout，不看退出码
+- `stamp()` 同样不再用退出码判断
+- **未授权时每 3 秒自动重测，最多 6 次**（重装后 UID 变了要重新授权，点完「允许」不再需要重启或切页面）
+- 每次回到界面重新计数；点顶部那行也能手动重测
+
 ## v1.4 变化
 
-- **界面去掉「LSPosed 保活」「电池白名单」两个按钮**，只留开始监听 / 立即检查 / 读取应用列表 / 测试通知
-- **root 检测重做**：
-  - su 超时 20s → 40s（第一次授权弹窗点慢了会被判未授权，这是「给了 root 还是失败」的常见原因）
-  - 一次 su 同时探测 4 个候选包名 × 2 个库文件名，不再写死 `com.google.android.gms`
-  - 顶部一行直接显示 su 真实结果；找不到库时列出各包 `databases` 目录内容
-  - **点顶部那行 = 重新检测**
+- 界面去掉「LSPosed 保活」「电池白名单」两个按钮，只留开始监听 / 立即检查 / 读取应用列表 / 测试通知
+- root 检测重做：su 超时 20s → 40s；顶部一行显示 su 真实结果；找不到库时列出各包 `databases` 目录内容
 - su 查找增加 `/system/xbin/su`、`/sbin/su`、`/debug_ramdisk/su`
 - 去掉 `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` 权限
 
@@ -63,7 +69,7 @@ database.noteAppMessage(msg.category, DataMessageStanza.ADAPTER.encodedSize(msg)
 - push 一个 `v*` tag：构建后自动创建 Release，并把 APK 作为附件上传（说明文字取 `RELEASE_NOTES.md`）
 
 ```bash
-git tag -a v1.4 -m "GcmWatch v1.4" && git push origin refs/tags/v1.4
+git tag -a v1.5 -m "GcmWatch v1.5" && git push origin refs/tags/v1.5
 ```
 
 

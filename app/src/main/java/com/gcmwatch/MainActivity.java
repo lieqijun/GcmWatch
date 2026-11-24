@@ -35,6 +35,7 @@ public class MainActivity extends Activity {
     private SharedPreferences sp;
     private long lastRootCheck;
     private volatile boolean checkingRoot;
+    private int rootRetry;
 
     private final Runnable tick = new Runnable() {
         @Override
@@ -159,6 +160,8 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         ui.post(tick);
+        // 用户可能刚去 root 管理器里点了授权，回来时给重试次数重新计数
+        rootRetry = 0;
         checkRoot(false);
     }
 
@@ -197,18 +200,38 @@ public class MainActivity extends Activity {
                     public void run() {
                         checkingRoot = false;
                         tvRoot.setText(text);
-                        if (text.startsWith("root：已授权")
-                                && text.contains("gcmstatus")
-                                && sp.getBoolean("running", false)) {
-                            // root 刚接通：让服务马上按新路径重建一次基线
-                            Intent i = new Intent(MainActivity.this, WatchService.class);
-                            i.setAction(WatchService.ACT_POLL);
-                            startForegroundService(i);
+                        if (text.startsWith("root：已授权")) {
+                            rootRetry = 0;
+                            if (text.contains("gcmstatus") && sp.getBoolean("running", false)) {
+                                // root 刚接通：让服务马上按新路径重建一次基线
+                                Intent i = new Intent(MainActivity.this, WatchService.class);
+                                i.setAction(WatchService.ACT_POLL);
+                                startForegroundService(i);
+                            }
+                        } else {
+                            // 重装后 UID 变了，root 管理器要重新记一次授权。
+                            // 用户点完「允许」时本页不会收到任何事件，所以这里自己重测几次。
+                            scheduleRootRetry();
                         }
                     }
                 });
             }
         }).start();
+    }
+
+    private void scheduleRootRetry() {
+        if (rootRetry >= 6) {
+            return;
+        }
+        rootRetry++;
+        ui.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (!isFinishing() && !isDestroyed()) {
+                    checkRoot(true);
+                }
+            }
+        }, 3000);
     }
 
     private void scan() {
