@@ -2,15 +2,6 @@
 
 微信完全冻结、零进程，也能收到「有新消息」的通知。
 
-## v1.1 变化
-
-- **修 bug**：基线建立时如果 `com.tencent.mm` 还没有记录，旧逻辑 `oldCount >= 0` 会让**第一条消息永远不通知**。现在按 0 处理，首条就通知。
-- **自带日志**：界面底部滚动显示运行日志，同时写到 `Android/data/com.gcmwatch/files/log/run.log`，不用连 adb 也能判断卡在哪一步。
-- **测试通知**：不依赖 root 和 microG，单独验证通知通道。
-- **立即检查**：跳过 8 秒轮询周期，马上抓一次。
-- **双保活**：JobScheduler 每 15 分钟兜底 + 可一键写入 Magisk `service.d` 看门狗脚本（进程死了 60 秒内拉回）。
-- **R8**：debug 包也开 minify + shrinkResources，dex 合并成单个。
-
 ## 原理
 
 microG 的 `McsService.handleAppMessage()` 第一行就是：
@@ -31,49 +22,76 @@ database.noteAppMessage(msg.category, DataMessageStanza.ADAPTER.encodedSize(msg)
 
 这个 app 就是拿 root 轮询这张表：`total_message_count` 涨了就弹一条通知。
 
-- 不 hook 系统，不改 system_server，不碰 LSPosed
 - 不启动微信，微信可以一直冻着
 - 拿不到消息内容（`app_data` 是密文），只能提示「有新消息」
 
+## v1.3 变化
+
+- **保活改用 LSPosed**（libxposed API 102，作用于 system_server）：
+  - 拦下 `forceStopPackage` / `killBackgroundProcesses` / `killApplication` / `killApplicationProcess` / `killPackageProcesses(Locked)` 对本应用的调用 → 清理后台杀不掉
+  - hook `ProcessList.startProcessLocked`，把本应用的 `ProcessRecord` 标成 `persistent` → 被内核层强杀后 system_server 自动拉起
+- **删掉 Magisk `service.d` 看门狗脚本**（实测拉不起来，`am start-foreground-service` / 广播 / monkey 三条路都没成功）
+- 删掉应用内日志、删掉 `/data/local/tmp` 日志
+- 通知文案只报「哪个应用有新消息」，不带条数
+
 ## 需要什么
 
-- root（Magisk / KernelSU 都行），授权本 app 使用 su
+- root（Magisk / KernelSU）+ **LSPosed**（需支持 libxposed API 101/102，即 LSPosed 1.9.3 之后的版本）
 - microG，且「Google 云端消息推送」里目标应用已经注册成功
-- 不需要 LSPosed，不需要 Thanox
+- 不需要 Thanox
+
+## 装完必做：启用模块
+
+1. 打开 **LSPosed 管理器** → 模块 → 找到「GCM 消息监听」→ 启用
+2. 点该模块的「作用域」→ 只勾 **系统框架** → 保存
+3. 重启手机（或重启系统框架）
+4. 在 LSPosed 的「日志」里过滤 `GcmWatch-LSP`，能看到每条 hook 的结果：
+   ```
+   hook forceStopPackage → 1 个重载
+   hook startProcessLocked → 2 个重载
+   已把本应用进程标记为 persistent（被杀自动重启）
+   ```
 
 ## 编译（GitHub Actions）
 
-1. 新建一个空仓库，把本目录下所有文件推上去（`.github/workflows/build.yml` 必须在仓库根）
-2. push 后自动触发，打开仓库的 **Actions** → 最新一次 `build` → 底部 **Artifacts** → 下载 `gcmwatch-debug.zip`
-3. 解压得到 `app-debug.apk`，装到手机上
-
-也可以在 Actions 页面点 **Run workflow** 手动触发。
+push 后自动构建，Actions → 最新一次 `build` → Artifacts → `gcmwatch-debug.zip`。
 
 ## 使用
 
 1. 打开 app，点「读取 microG 应用列表」，弹出 su 授权就同意
-2. 列表里会列出所有在 microG 里注册过的应用，勾选要监听的（默认已勾 `com.tencent.mm`）
+2. 勾选要监听的应用（默认已勾 `com.tencent.mm`）
 3. 点「开始监听」
-4. 去 MIUI 设置里给本 app：**省电策略 → 无限制**，**自启动 → 允许**（否则 MIUI 会杀掉常驻服务）
+4. MIUI：本 app **省电策略 → 无限制**，**自启动 → 允许**
 5. 用另一台手机发一条微信
 
-**注意第一次不会响。** 首次运行只是建立基线，之后新增的推送才通知。所以发消息前先让它跑一轮（12 秒）。
+**注意第一次不会响。** 首次运行只是建立基线，之后新增的推送才通知。
 
 ## 已知限制
 
-- 轮询间隔 12 秒，通知最多延迟 12 秒。想更快就改 `WatchService.POLL_MS`
-- WAL 文件抓取时如果正好撞上 microG 写入，快照可能不完整，代码会自动退回只读主库（那一次可能漏掉，下一条消息会补上差额）
-- microG 装的位置不是 `/data/data/com.google.android.gms` 时读不到，报错会写清楚
-- 只在 MIUI 14 / Android 13 上设计，其他版本没测
+- 轮询间隔 8 秒，通知最多延迟 8 秒。想更快就改 `WatchService.POLL_MS`
+- WAL 抓取时撞上 microG 写入，快照可能不完整，会自动退回只读主库（那一次可能漏，下一条补差额）
+- microG 数据目录不是 `/data/data/com.google.android.gms` 时读不到
+- 只在 MIUI 14 / Android 13 上设计
+
+## 出事怎么救
+
+如果改完开机异常，用 adb 停掉 LSPosed 再重启：
+
+```
+adb shell su -c "touch /data/adb/modules/zygisk_lsposed/disable"
+adb reboot
+```
 
 ## 目录
 
 ```
-.github/workflows/build.yml         CI
+app/src/main/resources/META-INF/xposed/   LSPosed 模块元数据（module.prop / scope.list / java_init.list）
 app/src/main/java/com/gcmwatch/
-    MainActivity.java               界面：root 检查、启停、勾选应用
-    WatchService.java               前台服务：轮询 + 弹通知
-    GcmDb.java                      读 microG 的 gcmstatus 库
-    RootShell.java                  执行 su 命令、二进制安全地取 stdout
-    BootReceiver.java               开机自启
+    xposed/XposedEntry.java      LSPosed 入口：system_server 保活 hook
+    MainActivity.java            界面：root 检查、启停、勾选应用
+    WatchService.java            前台服务：轮询 + 弹通知
+    GcmDb.java                   读 microG 的 gcmstatus 库
+    RootShell.java               执行 su 命令、二进制安全地取 stdout
+    BootReceiver.java            开机自启
+    WatchJob.java                JobScheduler 兜底
 ```
