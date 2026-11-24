@@ -11,44 +11,132 @@ import java.util.List;
 /**
  * 读 microG 的 GCM 状态库。
  *
- * 库文件: /data/data/com.google.android.gms/databases/gcmstatus
- * 表:     apps(package_name, last_message_timestamp, total_message_count,
- *              total_message_bytes, allow_register, wake_for_delivery)
+ * microG 源码（org.microg.gms.gcm.GcmDatabase）里 DB_NAME = "gcmstatus"，
+ * 走 SQLiteOpenHelper，所以真实路径是
+ *     /data/data/<gms包名>/databases/gcmstatus
+ * gms 包名不一定是 com.google.android.gms（各种修改版会换包名），所以这里逐个探。
+ *
+ * 表 apps(package_name, last_error, last_message_timestamp,
+ *         total_message_count, total_message_bytes, allow_register, wake_for_delivery)
  *
  * microG 在 McsService.handleAppMessage() 的第一行就调用 noteAppMessage()，
  * 也就是消息一到达就记账，和目标应用有没有被唤醒、广播有没有投递成功无关。
  */
 final class GcmDb {
 
-    static final String DB_PATH = "/data/data/com.google.android.gms/databases/gcmstatus";
+    /** 可能出现 gcmstatus 的包名，按可能性排序 */
+    private static final String[] PKGS = {
+            "com.google.android.gms",
+            "com.microg.gms",
+            "app.revanced.android.gms",
+            "com.mgoogle.android.gms",
+    };
 
-    static final class Row {
-        String pkg = "";
-        long timestamp;
-        long count;
-        long bytes;
-    }
+    private static final String[] DB_NAMES = {"gcmstatus", "gcmstatus.db"};
+
+    /** 探测到的库路径，进程内缓存 */
+    private static String cachedPath;
 
     private GcmDb() {
     }
 
+    /** 返回库文件的绝对路径，找不到返回 null */
+    static String path() {
+        if (cachedPath != null) {
+            return cachedPath;
+        }
+        StringBuilder cmd = new StringBuilder();
+        for (String pkg : PKGS) {
+            for (String name : DB_NAMES) {
+                cmd.append("[ -f '/data/data/").append(pkg).append("/databases/").append(name)
+                        .append("' ] && echo '").append(pkg).append('/').append(name).append("'; ");
+            }
+        }
+        RootShell.Result r = RootShell.run(cmd.toString());
+        if (!r.ok()) {
+            return null;
+        }
+        String best = null;
+        for (String line : r.text().split("\n")) {
+            String s = line.trim();
+            if (s.isEmpty()) {
+                continue;
+            }
+            if (best == null) {
+                best = s;
+            }
+            if (s.endsWith("/gcmstatus")) {
+                best = s;
+                break;
+            }
+        }
+        if (best != null) {
+            cachedPath = "/data/data/" + best;
+        }
+        return cachedPath;
+    }
+
+    /** 库文件是否已经生成（microG 从没收到过推送时，这个文件可能还不存在） */
+    static boolean dbExists() {
+        return path() != null;
+    }
+
     /**
      * 数据库签名，用于判断有没有变化。
-     * 优先看 -wal（microG 开启了 WAL），它每次写入都会变。
+     * 优先看 -wal（microG 开了 WAL），它每次写入都会变。
      */
     static String stamp() {
-        String cmd = "stat -c '%Y:%s' " + DB_PATH + "-wal 2>/dev/null; "
-                + "stat -c '%Y:%s' " + DB_PATH + " 2>/dev/null";
-        RootShell.Result r = RootShell.run(cmd);
+        String p = path();
+        if (p == null) {
+            return "";
+        }
+        RootShell.Result r = RootShell.run(
+                "stat -c '%Y:%s' '" + p + "-wal' 2>/dev/null; "
+                        + "stat -c '%Y:%s' '" + p + "' 2>/dev/null");
         if (!r.ok()) {
             return "";
         }
         return r.text().trim();
     }
 
-    static boolean dbExists() {
-        RootShell.Result r = RootShell.run("ls -l " + DB_PATH + " 2>/dev/null");
-        return r.ok() && r.text().contains(DB_PATH);
+    /**
+     * 给界面看的诊断文本：root 通不通、库在哪、找不到时各候选包的 databases 目录长什么样。
+     */
+    static String diagnose() {
+        StringBuilder sb = new StringBuilder();
+        RootShell.Result id = RootShell.run("id");
+        boolean root = id.ok() && id.text().contains("uid=0");
+        if (!root) {
+            sb.append("root：未授权");
+            String msg = oneLine(id.err.isEmpty() ? id.text() : id.err);
+            if (msg.length() > 0) {
+                sb.append(" · ").append(clip(msg, 70));
+            }
+            sb.append("\n点这里可重新检测（会弹 su）");
+            return sb.toString();
+        }
+        sb.append("root：已授权");
+
+        String p = path();
+        if (p != null) {
+            sb.append(" · 数据库 ").append(p.replace("/data/data/", ""));
+            return sb.toString();
+        }
+
+        cachedPath = null;
+        sb.append(" · 没找到 gcmstatus\n下面是各包 databases 目录：");
+        for (String pkg : PKGS) {
+            RootShell.Result r = RootShell.run(
+                    "ls '/data/data/" + pkg + "/databases' 2>&1 | tr '\\n' ' '");
+            String ls = oneLine(r.text());
+            if (ls.contains("No such file")) {
+                ls = "（无此包）";
+            } else if (ls.trim().isEmpty()) {
+                ls = "（空）";
+            }
+            sb.append("\n").append(pkg).append("：").append(clip(ls, 90));
+        }
+        return sb.toString();
     }
 
     /**
@@ -77,6 +165,11 @@ final class GcmDb {
     }
 
     private static List<Row> readOnce(Context ctx) throws Exception {
+        String dbPath = path();
+        if (dbPath == null) {
+            throw new Exception("没找到 gcmstatus（点顶部文字看诊断）");
+        }
+
         File dir = new File(ctx.getCacheDir(), "gcmdb");
         if (!dir.exists() && !dir.mkdirs()) {
             throw new Exception("无法创建缓存目录");
@@ -92,11 +185,12 @@ final class GcmDb {
         //noinspection ResultOfMethodCallIgnored
         shm.delete();
 
-        if (!RootShell.pullTo(DB_PATH, main)) {
-            throw new Exception("读不到 " + DB_PATH + "（root 未授权？路径不对？）");
+        if (!RootShell.pullTo(dbPath, main)) {
+            cachedPath = null;
+            throw new Exception("读不到 " + dbPath + "（su 被拒绝？）");
         }
-        boolean gotWal = RootShell.pullTo(DB_PATH + "-wal", wal);
-        boolean gotShm = RootShell.pullTo(DB_PATH + "-shm", shm);
+        boolean gotWal = RootShell.pullTo(dbPath + "-wal", wal);
+        boolean gotShm = RootShell.pullTo(dbPath + "-shm", shm);
 
         if (!gotWal || !gotShm) {
             // 只有主库也能查，但没有 WAL 会漏掉最近的写入
@@ -143,5 +237,20 @@ final class GcmDb {
             }
         }
         return result;
+    }
+
+    private static String oneLine(String s) {
+        return s == null ? "" : s.replace('\n', ' ').replace('\r', ' ').trim();
+    }
+
+    private static String clip(String s, int max) {
+        return s.length() <= max ? s : s.substring(0, max) + "…";
+    }
+
+    static final class Row {
+        String pkg = "";
+        long timestamp;
+        long count;
+        long bytes;
     }
 }

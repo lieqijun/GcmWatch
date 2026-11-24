@@ -103,7 +103,9 @@ public class WatchService extends Service {
     private void poll() {
         String stamp = GcmDb.stamp();
         if (stamp.length() == 0) {
-            setStatus("读不到 microG 数据库：su 被拒绝，或路径不同");
+            setStatus(GcmDb.dbExists()
+                    ? "读到库但不通：su 被拒绝？点顶部文字看诊断"
+                    : "没找到 gcmstatus，点顶部文字看诊断");
             return;
         }
 

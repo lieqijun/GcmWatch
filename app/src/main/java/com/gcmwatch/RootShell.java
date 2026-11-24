@@ -15,6 +15,14 @@ final class RootShell {
 
     static final int EXIT_NO_BINARY = -2;
 
+    /** su 的常见位置；Magisk / KernelSU / 系统自带 */
+    private static final String[] SU_CANDIDATES = {
+            "su", "/system/bin/su", "/system/xbin/su", "/sbin/su", "/debug_ramdisk/su"
+    };
+
+    /** 首次授权要等用户在弹窗里点「允许」，所以不能太短 */
+    private static final int TIMEOUT_SEC = 40;
+
     static final class Result {
         final int code;
         final byte[] out;
@@ -43,11 +51,15 @@ final class RootShell {
     }
 
     static Result run(String cmd) {
-        Result r = runOnce("su", cmd);
-        if (r.code == EXIT_NO_BINARY) {
-            r = runOnce("/system/bin/su", cmd);
+        Result last = null;
+        for (String binary : SU_CANDIDATES) {
+            Result r = runOnce(binary, cmd);
+            if (r.code != EXIT_NO_BINARY) {
+                return r;
+            }
+            last = r;
         }
-        return r;
+        return last == null ? new Result(EXIT_NO_BINARY, new byte[0], "su not found") : last;
     }
 
     /** 快速判断 root 是否可用 */
@@ -82,7 +94,7 @@ final class RootShell {
             ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
             drain(p.getInputStream(), outBuf);
 
-            boolean finished = p.waitFor(20, TimeUnit.SECONDS);
+            boolean finished = p.waitFor(TIMEOUT_SEC, TimeUnit.SECONDS);
             if (!finished) {
                 try {
                     p.destroy();

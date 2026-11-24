@@ -5,13 +5,10 @@ import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
-import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.PowerManager;
-import android.provider.Settings;
 import android.view.View;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -32,12 +29,12 @@ public class MainActivity extends Activity {
     private Button btnScan;
     private Button btnTest;
     private Button btnCheck;
-    private Button btnKeep;
-    private Button btnBattery;
     private LinearLayout llApps;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private SharedPreferences sp;
+    private long lastRootCheck;
+    private volatile boolean checkingRoot;
 
     private final Runnable tick = new Runnable() {
         @Override
@@ -84,8 +81,6 @@ public class MainActivity extends Activity {
         btnScan = findViewById(R.id.btnScan);
         btnTest = findViewById(R.id.btnTest);
         btnCheck = findViewById(R.id.btnCheck);
-        btnKeep = findViewById(R.id.btnKeep);
-        btnBattery = findViewById(R.id.btnBattery);
         llApps = findViewById(R.id.llApps);
 
         btnPerm.setOnClickListener(new View.OnClickListener() {
@@ -134,17 +129,12 @@ public class MainActivity extends Activity {
             }
         });
 
-        btnKeep.setOnClickListener(new View.OnClickListener() {
+        // 点顶部那一行可以重新检测 root：
+        // 第一次弹 su 授权框时如果点慢了，会按超时判成未授权
+        tvRoot.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                showModuleHelp();
-            }
-        });
-
-        btnBattery.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                askBatteryWhitelist();
+                checkRoot(true);
             }
         });
 
@@ -154,7 +144,7 @@ public class MainActivity extends Activity {
             WatchJob.schedule(this);
         }
 
-        checkRoot();
+        checkRoot(false);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
@@ -169,6 +159,7 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         ui.post(tick);
+        checkRoot(false);
     }
 
     @Override
@@ -186,55 +177,38 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void checkRoot() {
+    private void checkRoot(final boolean force) {
+        if (checkingRoot) {
+            return;
+        }
+        if (!force && System.currentTimeMillis() - lastRootCheck < 3000) {
+            return;
+        }
+        checkingRoot = true;
+        lastRootCheck = System.currentTimeMillis();
+        tvRoot.setText("root：检测中…（第一次会弹 su，请点允许）");
+
         new Thread(new Runnable() {
             @Override
             public void run() {
-                final boolean ok = RootShell.available();
-                final boolean db = ok && GcmDb.dbExists();
+                final String text = GcmDb.diagnose();
                 ui.post(new Runnable() {
                     @Override
                     public void run() {
-                        if (!ok) {
-                            tvRoot.setText("root：未授权（点「读取应用列表」会弹 su）");
-                        } else if (!db) {
-                            tvRoot.setText("root：已授权 · 找不到 gcmstatus 数据库");
-                        } else {
-                            tvRoot.setText("root：已授权 · microG 数据库正常");
+                        checkingRoot = false;
+                        tvRoot.setText(text);
+                        if (text.startsWith("root：已授权")
+                                && text.contains("gcmstatus")
+                                && sp.getBoolean("running", false)) {
+                            // root 刚接通：让服务马上按新路径重建一次基线
+                            Intent i = new Intent(MainActivity.this, WatchService.class);
+                            i.setAction(WatchService.ACT_POLL);
+                            startForegroundService(i);
                         }
                     }
                 });
             }
         }).start();
-    }
-
-    private void askBatteryWhitelist() {
-        try {
-            PowerManager pm = getSystemService(PowerManager.class);
-            if (pm != null && pm.isIgnoringBatteryOptimizations(getPackageName())) {
-                Toast.makeText(this, "已在电池白名单里", Toast.LENGTH_SHORT).show();
-                return;
-            }
-            Intent i = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
-            i.setData(Uri.parse("package:" + getPackageName()));
-            startActivity(i);
-        } catch (Throwable t) {
-            Toast.makeText(this, "打不开白名单页面：" + t, Toast.LENGTH_LONG).show();
-        }
-    }
-
-    private void showModuleHelp() {
-        String msg = "1. 手机需已安装 LSPosed（新版，支持 libxposed API 101/102）\n\n"
-                + "2. 打开 LSPosed 管理器 → 模块 → 找到「GCM 消息监听」并启用\n\n"
-                + "3. 点该模块的「作用域」，只勾【系统框架】，保存\n\n"
-                + "4. 重启手机（或重启系统框架）才生效\n\n"
-                + "生效后：清理后台杀不掉本应用；被系统强杀后会自动重启。\n\n"
-                + "在 LSPosed 管理器的「日志」里过滤 GcmWatch-LSP，能看到每条 hook 结果。";
-        new android.app.AlertDialog.Builder(this)
-                .setTitle("LSPosed 保活怎么开")
-                .setMessage(msg)
-                .setPositiveButton("知道了", null)
-                .show();
     }
 
     private void scan() {
