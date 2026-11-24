@@ -25,8 +25,6 @@ import java.util.Set;
 
 public class MainActivity extends Activity {
 
-    private static final String KEEPALIVE_PATH = "/data/adb/service.d/99-gcmwatch.sh";
-
     private TextView tvRoot;
     private TextView tvStatus;
     private Button btnPerm;
@@ -139,7 +137,7 @@ public class MainActivity extends Activity {
         btnKeep.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                installKeepAlive();
+                showModuleHelp();
             }
         });
 
@@ -225,58 +223,18 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void installKeepAlive() {
-        btnKeep.setEnabled(false);
-        Toast.makeText(this, "正在写入…（会弹 su）", Toast.LENGTH_SHORT).show();
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                String[] lines = {
-                        "#!/system/bin/sh",
-                        "# GcmWatch 看门狗（由 app 写入，Magisk service.d）",
-                        "LOG=/data/local/tmp/gcmwatch.log",
-                        "(",
-                        "  sleep 15",
-                        "  while true; do",
-                        "    if ! pidof com.gcmwatch >/dev/null 2>&1; then",
-                        "      echo \"[$(date '+%m-%d %H:%M:%S')] 进程不在，开始拉起\" >> $LOG",
-                        "      am start-foreground-service --user 0 -n com.gcmwatch/.WatchService"
-                                + " >> $LOG 2>&1",
-                        "      sleep 4",
-                        "      if ! pidof com.gcmwatch >/dev/null 2>&1; then",
-                        "        echo \"[$(date '+%m-%d %H:%M:%S')] start-foreground-service 无效，"
-                                + "改用广播\" >> $LOG",
-                        "        am broadcast --user 0 -a com.gcmwatch.WAKE"
-                                + " -n com.gcmwatch/.WakeReceiver >> $LOG 2>&1",
-                        "        sleep 4",
-                        "      fi",
-                        "      if ! pidof com.gcmwatch >/dev/null 2>&1; then",
-                        "        echo \"[$(date '+%m-%d %H:%M:%S')] 广播也无效，改用 monkey\" >> $LOG",
-                        "        monkey -p com.gcmwatch -c android.intent.category.LAUNCHER 1"
-                                + " >> $LOG 2>&1",
-                        "      fi",
-                        "      [ \"$(stat -c %s $LOG 2>/dev/null)\" -gt 200000 ] && > $LOG",
-                        "    fi",
-                        "    sleep 45",
-                        "  done",
-                        ") &",
-                        ""};
-                StringBuilder sb = new StringBuilder();
-                for (String l : lines) {
-                    sb.append(l).append('\n');
-                }
-                final String err = RootShell.writeRootText(KEEPALIVE_PATH, sb.toString());
-                ui.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        btnKeep.setEnabled(true);
-                        Toast.makeText(MainActivity.this,
-                                err == null ? "已写入，重启后生效" : err,
-                                Toast.LENGTH_LONG).show();
-                    }
-                });
-            }
-        }).start();
+    private void showModuleHelp() {
+        String msg = "1. 手机需已安装 LSPosed（新版，支持 libxposed API 101/102）\n\n"
+                + "2. 打开 LSPosed 管理器 → 模块 → 找到「GCM 消息监听」并启用\n\n"
+                + "3. 点该模块的「作用域」，只勾【系统框架】，保存\n\n"
+                + "4. 重启手机（或重启系统框架）才生效\n\n"
+                + "生效后：清理后台杀不掉本应用；被系统强杀后会自动重启。\n\n"
+                + "在 LSPosed 管理器的「日志」里过滤 GcmWatch-LSP，能看到每条 hook 结果。";
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("LSPosed 保活怎么开")
+                .setMessage(msg)
+                .setPositiveButton("知道了", null)
+                .show();
     }
 
     private void scan() {

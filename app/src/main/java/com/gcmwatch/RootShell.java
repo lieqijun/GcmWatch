@@ -130,29 +130,6 @@ final class RootShell {
         }
     }
 
-    /**
-     * 以 root 身份把一个文本文件写到指定路径（先 base64 编码，避开引号和换行转义）。
-     *
-     * @return 成功返回 null，失败返回错误描述
-     */
-    static String writeRootText(String path, String content) {
-        String b64;
-        try {
-            b64 = android.util.Base64.encodeToString(
-                    content.getBytes("UTF-8"), android.util.Base64.NO_WRAP);
-        } catch (UnsupportedEncodingException e) {
-            return "编码失败";
-        }
-        String dir = path.substring(0, path.lastIndexOf('/'));
-        String cmd = "mkdir -p '" + dir + "' && echo '" + b64 + "' | base64 -d > '" + path
-                + "' && chmod 755 '" + path + "' && ls -l '" + path + "'";
-        Result r = run(cmd);
-        if (!r.ok()) {
-            return "写入失败(" + r.code + "): " + r.err.trim();
-        }
-        return null;
-    }
-
     /** 把 root 那边的文件内容抓成本地文件，返回是否成功 */
     static boolean pullTo(String srcPath, File dst) {
         Result r = cat(srcPath);
