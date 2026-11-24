@@ -123,9 +123,17 @@ final class GcmDb {
             sb.append("root：未授权");
             String msg = oneLine(id.err.isEmpty() ? id.text() : id.err);
             if (msg.length() > 0) {
-                sb.append(" · ").append(clip(msg, 70));
+                sb.append(" · ").append(clip(msg, 90));
             }
-            sb.append("\n弹窗里点「允许」；3 秒后会自动重测，也可以点这行手动重测");
+            // 关键判据：这些文件在本进程里到底看不看得见。
+            // 全都「无」而 Magisk 里已经给了授权 → su 被 Magisk 的 DenyList / LSPosed 的
+            // unmount 藏起来了，不是没装 root。
+            sb.append("\nsu 文件：");
+            String[] probe = {"/system/bin/su", "/debug_ramdisk/su", "/system/xbin/su"};
+            for (String p : probe) {
+                sb.append(p).append(new File(p).exists() ? " 有  " : " 无  ");
+            }
+            sb.append("\n弹窗点「允许」；3 秒后自动重测，也可点这行手动重测");
             return sb.toString();
         }
         sb.append("root：已授权");

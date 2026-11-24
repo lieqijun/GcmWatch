@@ -25,6 +25,15 @@ database.noteAppMessage(msg.category, DataMessageStanza.ADAPTER.encodedSize(msg)
 - 不启动微信，微信可以一直冻着
 - 拿不到消息内容（`app_data` 是密文），只能提示「有新消息」
 
+## v1.6 变化（su 被 DenyList / Zygisk 藏起来）
+
+现象：`Cannot run program "/debug_ramdisk/su": error=2`，所有候选路径都 ENOENT，但 Magisk 里已经勾了授权。
+
+- 界面新增一行 `su 文件：/system/bin/su 有/无 …`，直接判断这三个文件在当前进程里看不看得见
+- su 候选增加 `/data/adb/magisk/su`、`/data/adb/ap/bin/su`、`/data/adb/ksu/bin/su`
+- 绝对路径全失败时，借 `/system/bin/sh` 用自己的 PATH 再找一次 su
+- 处理办法：Magisk 设置里关掉「强制执行拒绝列表（Enforce DenyList）」，并确认「配置拒绝列表」里没有勾本应用，然后强制停止应用再打开
+
 ## v1.5 变化（修 v1.4 读不到列表）
 
 **根因**：v1.4 的多包名探测把「shell 退出码」当成了「su 是否成功」。命令末尾最后一个 `[ -f ]` 不成立 → 退出码 1 → 已经命中并打在 stdout 里的路径被整条丢弃。
@@ -69,7 +78,7 @@ database.noteAppMessage(msg.category, DataMessageStanza.ADAPTER.encodedSize(msg)
 - push 一个 `v*` tag：构建后自动创建 Release，并把 APK 作为附件上传（说明文字取 `RELEASE_NOTES.md`）
 
 ```bash
-git tag -a v1.5 -m "GcmWatch v1.5" && git push origin refs/tags/v1.5
+git tag -a v1.6 -m "GcmWatch v1.6" && git push origin refs/tags/v1.6
 ```
 
 

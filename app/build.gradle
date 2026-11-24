@@ -10,8 +10,8 @@ android {
         applicationId "com.gcmwatch"
         minSdk 26
         targetSdk 34
-        versionCode 7
-        versionName "1.5"
+        versionCode 8
+        versionName "1.6"
         // 只保留中文资源，去掉 AAPT 带入的其他语言
         resourceConfigurations += ['zh']
     }

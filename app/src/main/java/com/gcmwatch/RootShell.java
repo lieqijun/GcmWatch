@@ -15,9 +15,16 @@ final class RootShell {
 
     static final int EXIT_NO_BINARY = -2;
 
-    /** su 的常见位置；Magisk / KernelSU / 系统自带 */
-    private static final String[] SU_CANDIDATES = {
-            "su", "/system/bin/su", "/system/xbin/su", "/sbin/su", "/debug_ramdisk/su"
+    /** su 的常见位置；Magisk / KernelSU / APatch / 系统自带 */
+    static final String[] SU_CANDIDATES = {
+            "su",
+            "/system/bin/su",
+            "/debug_ramdisk/su",
+            "/system/xbin/su",
+            "/sbin/su",
+            "/data/adb/magisk/su",
+            "/data/adb/ap/bin/su",
+            "/data/adb/ksu/bin/su"
     };
 
     /** 首次授权要等用户在弹窗里点「允许」，所以不能太短 */
@@ -59,7 +66,19 @@ final class RootShell {
             }
             last = r;
         }
+        // 所有绝对路径都 exec 失败：可能是本进程的 PATH / mount namespace 里看不到 su
+        // （Magisk 的 DenyList、LSPosed 注入后的 unmount 都会造成这个现象）。
+        // 再借 sh 找一次，sh 有自己的 PATH。
+        Result viaSh = runOnce("/system/bin/sh", "su -c " + sq(cmd));
+        if (viaSh.code != EXIT_NO_BINARY && viaSh.code != 127) {
+            return viaSh;
+        }
         return last == null ? new Result(EXIT_NO_BINARY, new byte[0], "su not found") : last;
+    }
+
+    /** 单引号包裹，内部单引号按 shell 规则转义 */
+    private static String sq(String s) {
+        return "'" + s.replace("'", "'\\''") + "'";
     }
 
     /** 快速判断 root 是否可用 */
