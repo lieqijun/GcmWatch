@@ -2,6 +2,15 @@
 
 微信完全冻结、零进程，也能收到「有新消息」的通知。
 
+## v1.1 变化
+
+- **修 bug**：基线建立时如果 `com.tencent.mm` 还没有记录，旧逻辑 `oldCount >= 0` 会让**第一条消息永远不通知**。现在按 0 处理，首条就通知。
+- **自带日志**：界面底部滚动显示运行日志，同时写到 `Android/data/com.gcmwatch/files/log/run.log`，不用连 adb 也能判断卡在哪一步。
+- **测试通知**：不依赖 root 和 microG，单独验证通知通道。
+- **立即检查**：跳过 8 秒轮询周期，马上抓一次。
+- **双保活**：JobScheduler 每 15 分钟兜底 + 可一键写入 Magisk `service.d` 看门狗脚本（进程死了 60 秒内拉回）。
+- **R8**：debug 包也开 minify + shrinkResources，dex 合并成单个。
+
 ## 原理
 
 microG 的 `McsService.handleAppMessage()` 第一行就是：
