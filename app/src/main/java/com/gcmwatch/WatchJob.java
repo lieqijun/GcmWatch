@@ -25,11 +25,9 @@ public class WatchJob extends JobService {
     public boolean onStartJob(JobParameters params) {
         SharedPreferences sp = getSharedPreferences(WatchService.PREF, MODE_PRIVATE);
         if (sp.getBoolean("running", false)) {
-            Diag.add(this, "JobScheduler 唤醒，检查服务");
             try {
                 startForegroundService(new Intent(this, WatchService.class));
-            } catch (Throwable t) {
-                Diag.add(this, "job 拉起服务失败: " + t);
+            } catch (Throwable ignored) {
             }
         }
         return false;

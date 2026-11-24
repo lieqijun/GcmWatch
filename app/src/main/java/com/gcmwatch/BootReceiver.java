@@ -16,9 +16,7 @@ public class BootReceiver extends BroadcastReceiver {
         try {
             context.startForegroundService(new Intent(context, WatchService.class));
             WatchJob.schedule(context);
-            Diag.add(context, "开机自启：已拉起监听");
-        } catch (Throwable t) {
-            Diag.add(context, "开机自启失败: " + t);
+        } catch (Throwable ignored) {
         }
     }
 }

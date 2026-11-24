@@ -15,27 +15,28 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="root：检测中…"
-            android:textSize="14sp" />
+            android:textSize="13sp" />
 
         <TextView
             android:id="@+id/tvStatus"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
+            android:layout_marginTop="8dp"
             android:text="未启动"
-            android:textSize="14sp"
+            android:textSize="15sp"
             android:textStyle="bold" />
 
         <Button
             android:id="@+id/btnPerm"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
+            android:layout_marginTop="6dp"
             android:text="申请通知权限" />
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
             android:orientation="horizontal">
 
             <Button
@@ -73,11 +74,25 @@
                 android:text="测试通知" />
         </LinearLayout>
 
-        <Button
-            android:id="@+id/btnKeep"
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="安装 root 保活（需 Magisk）" />
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnKeep"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="安装 root 保活" />
+
+            <Button
+                android:id="@+id/btnBattery"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="电池白名单" />
+        </LinearLayout>
 
         <TextView
             android:layout_width="match_parent"
@@ -96,27 +111,9 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:text="运行日志（同时写到 Android/data/com.gcmwatch/files/log/run.log）："
-            android:textSize="13sp" />
-
-        <TextView
-            android:id="@+id/tvLog"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:background="#11000000"
-            android:fontFamily="monospace"
-            android:padding="8dp"
-            android:textIsSelectable="true"
-            android:textSize="11sp" />
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
             android:textSize="12sp"
             android:textColor="#666666"
-            android:text="工作方式：以 root 读 /data/data/com.google.android.gms/databases/gcmstatus 的 apps 表，发现 total_message_count 增加时弹通知。不碰目标应用，目标应用可以完全冻结。" />
+            android:text="以 root 读 microG 的 gcmstatus 数据库，某个应用的消息计数变大就弹通知。不碰目标应用本身，目标应用可以完全冻结。" />
 
     </LinearLayout>
 </ScrollView>

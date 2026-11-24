@@ -5,10 +5,13 @@ import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
+import android.provider.Settings;
 import android.view.View;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -26,13 +29,13 @@ public class MainActivity extends Activity {
 
     private TextView tvRoot;
     private TextView tvStatus;
-    private TextView tvLog;
     private Button btnPerm;
     private Button btnToggle;
     private Button btnScan;
     private Button btnTest;
     private Button btnCheck;
     private Button btnKeep;
+    private Button btnBattery;
     private LinearLayout llApps;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -42,10 +45,30 @@ public class MainActivity extends Activity {
         @Override
         public void run() {
             boolean running = sp.getBoolean("running", false);
-            String status = sp.getString("status", "未启动");
-            tvStatus.setText((running ? "【运行中】 " : "【已停止】 ") + status);
+            long last = sp.getLong("lastPoll", 0);
+            long age = last == 0 ? -1 : (System.currentTimeMillis() - last) / 1000;
+            boolean alive = age >= 0 && age < 40;
+
+            String head;
+            if (!running) {
+                head = "【已停止】 ";
+            } else if (alive) {
+                head = "【运行中】 ";
+            } else {
+                head = "【服务没在跑】 ";
+            }
+
+            String tail;
+            if (age < 0) {
+                tail = " · 还没检查过";
+            } else if (age < 60) {
+                tail = " · 最后检查 " + age + " 秒前";
+            } else {
+                tail = " · 最后检查 " + (age / 60) + " 分钟前";
+            }
+
+            tvStatus.setText(head + sp.getString("status", "未启动") + tail);
             btnToggle.setText(running ? "停止监听" : "开始监听");
-            tvLog.setText(Diag.dump());
             ui.postDelayed(this, 1000);
         }
     };
@@ -58,13 +81,13 @@ public class MainActivity extends Activity {
 
         tvRoot = findViewById(R.id.tvRoot);
         tvStatus = findViewById(R.id.tvStatus);
-        tvLog = findViewById(R.id.tvLog);
         btnPerm = findViewById(R.id.btnPerm);
         btnToggle = findViewById(R.id.btnToggle);
         btnScan = findViewById(R.id.btnScan);
         btnTest = findViewById(R.id.btnTest);
         btnCheck = findViewById(R.id.btnCheck);
         btnKeep = findViewById(R.id.btnKeep);
+        btnBattery = findViewById(R.id.btnBattery);
         llApps = findViewById(R.id.llApps);
 
         btnPerm.setOnClickListener(new View.OnClickListener() {
@@ -85,7 +108,6 @@ public class MainActivity extends Activity {
                 } else {
                     startForegroundService(new Intent(MainActivity.this, WatchService.class));
                     WatchJob.schedule(MainActivity.this);
-                    Diag.add(MainActivity.this, "开始监听，已排 JobScheduler 兜底");
                 }
             }
         });
@@ -121,6 +143,19 @@ public class MainActivity extends Activity {
             }
         });
 
+        btnBattery.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                askBatteryWhitelist();
+            }
+        });
+
+        // 之前开过监听、但进程被清了：一打开界面就自动把服务拉回来
+        if (sp.getBoolean("running", false)) {
+            startForegroundService(new Intent(this, WatchService.class));
+            WatchJob.schedule(this);
+        }
+
         checkRoot();
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
@@ -150,7 +185,6 @@ public class MainActivity extends Activity {
         if (requestCode == 42 && grantResults.length > 0
                 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
             btnPerm.setVisibility(View.GONE);
-            Diag.add(this, "通知权限已授予");
         }
     }
 
@@ -176,37 +210,69 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    private void askBatteryWhitelist() {
+        try {
+            PowerManager pm = getSystemService(PowerManager.class);
+            if (pm != null && pm.isIgnoringBatteryOptimizations(getPackageName())) {
+                Toast.makeText(this, "已在电池白名单里", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            Intent i = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+            i.setData(Uri.parse("package:" + getPackageName()));
+            startActivity(i);
+        } catch (Throwable t) {
+            Toast.makeText(this, "打不开白名单页面：" + t, Toast.LENGTH_LONG).show();
+        }
+    }
+
     private void installKeepAlive() {
         btnKeep.setEnabled(false);
         Toast.makeText(this, "正在写入…（会弹 su）", Toast.LENGTH_SHORT).show();
         new Thread(new Runnable() {
             @Override
             public void run() {
-                final String script =
-                        "#!/system/bin/sh\n"
-                                + "# GcmWatch 保活看门狗（由 app 写入，Magisk service.d）\n"
-                                + "(\n"
-                                + "  sleep 20\n"
-                                + "  while true; do\n"
-                                + "    if ! pidof com.gcmwatch >/dev/null 2>&1; then\n"
-                                + "      am start-foreground-service -n com.gcmwatch/.WatchService"
-                                + " >/dev/null 2>&1\n"
-                                + "      sleep 5\n"
-                                + "      am startservice -n com.gcmwatch/.WatchService >/dev/null 2>&1\n"
-                                + "    fi\n"
-                                + "    sleep 60\n"
-                                + "  done\n"
-                                + ") &\n";
-                final String err = RootShell.writeRootText(KEEPALIVE_PATH, script);
+                String[] lines = {
+                        "#!/system/bin/sh",
+                        "# GcmWatch 看门狗（由 app 写入，Magisk service.d）",
+                        "LOG=/data/local/tmp/gcmwatch.log",
+                        "(",
+                        "  sleep 15",
+                        "  while true; do",
+                        "    if ! pidof com.gcmwatch >/dev/null 2>&1; then",
+                        "      echo \"[$(date '+%m-%d %H:%M:%S')] 进程不在，开始拉起\" >> $LOG",
+                        "      am start-foreground-service --user 0 -n com.gcmwatch/.WatchService"
+                                + " >> $LOG 2>&1",
+                        "      sleep 4",
+                        "      if ! pidof com.gcmwatch >/dev/null 2>&1; then",
+                        "        echo \"[$(date '+%m-%d %H:%M:%S')] start-foreground-service 无效，"
+                                + "改用广播\" >> $LOG",
+                        "        am broadcast --user 0 -a com.gcmwatch.WAKE"
+                                + " -n com.gcmwatch/.WakeReceiver >> $LOG 2>&1",
+                        "        sleep 4",
+                        "      fi",
+                        "      if ! pidof com.gcmwatch >/dev/null 2>&1; then",
+                        "        echo \"[$(date '+%m-%d %H:%M:%S')] 广播也无效，改用 monkey\" >> $LOG",
+                        "        monkey -p com.gcmwatch -c android.intent.category.LAUNCHER 1"
+                                + " >> $LOG 2>&1",
+                        "      fi",
+                        "      [ \"$(stat -c %s $LOG 2>/dev/null)\" -gt 200000 ] && > $LOG",
+                        "    fi",
+                        "    sleep 45",
+                        "  done",
+                        ") &",
+                        ""};
+                StringBuilder sb = new StringBuilder();
+                for (String l : lines) {
+                    sb.append(l).append('\n');
+                }
+                final String err = RootShell.writeRootText(KEEPALIVE_PATH, sb.toString());
                 ui.post(new Runnable() {
                     @Override
                     public void run() {
                         btnKeep.setEnabled(true);
-                        String msg = err == null
-                                ? "已写入 " + KEEPALIVE_PATH + "，重启后生效"
-                                : err;
-                        Diag.add(MainActivity.this, "写保活脚本: " + msg);
-                        Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show();
+                        Toast.makeText(MainActivity.this,
+                                err == null ? "已写入，重启后生效" : err,
+                                Toast.LENGTH_LONG).show();
                     }
                 });
             }
@@ -235,12 +301,10 @@ public class MainActivity extends Activity {
                     public void run() {
                         btnScan.setEnabled(true);
                         if (fError != null) {
-                            Diag.add(MainActivity.this, "读取列表失败: " + fError);
                             Toast.makeText(MainActivity.this, "失败：" + fError,
                                     Toast.LENGTH_LONG).show();
                             return;
                         }
-                        Diag.add(MainActivity.this, "读取列表成功，" + fRows.size() + " 个应用");
                         fillApps(fRows);
                     }
                 });
@@ -276,7 +340,6 @@ public class MainActivity extends Activity {
                         cur.remove(row.pkg);
                     }
                     WatchService.setWatching(MainActivity.this, cur);
-                    Diag.add(MainActivity.this, (isChecked ? "监听 " : "取消监听 ") + row.pkg);
                 }
             });
             llApps.addView(cb);

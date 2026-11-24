@@ -4,6 +4,7 @@
 -keep class com.gcmwatch.WatchService { *; }
 -keep class com.gcmwatch.WatchJob { *; }
 -keep class com.gcmwatch.BootReceiver { *; }
+-keep class com.gcmwatch.WakeReceiver { *; }
 
 # 去掉日志调用的字符串拼接开销（本项目只用自定义 Diag，不调用 android.util.Log）
 -assumenosideeffects class android.util.Log {

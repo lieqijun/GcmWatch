@@ -65,7 +65,6 @@ final class GcmDb {
                 return readOnce(ctx);
             } catch (Exception e) {
                 last = e;
-                Diag.add(ctx, "db 读取第 " + (attempt + 1) + " 次失败: " + e.getMessage());
                 try {
                     Thread.sleep(150);
                 } catch (InterruptedException ie) {

@@ -48,6 +48,14 @@
             </intent-filter>
         </receiver>
 
+        <receiver
+            android:name=".WakeReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.gcmwatch.WAKE" />
+            </intent-filter>
+        </receiver>
+
     </application>
 
 </manifest>
