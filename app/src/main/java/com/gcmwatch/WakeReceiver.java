@@ -18,7 +18,8 @@ public class WakeReceiver extends BroadcastReceiver {
 
     @Override
     public void onReceive(Context context, Intent intent) {
-        SharedPreferences sp = context.getSharedPreferences(WatchService.PREF, MODE_PRIVATE);
+        SharedPreferences sp = context.getSharedPreferences(
+                WatchService.PREF, Context.MODE_PRIVATE);
         if (!sp.getBoolean("running", false)) {
             return;
         }
