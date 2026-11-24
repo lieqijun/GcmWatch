@@ -52,9 +52,15 @@ database.noteAppMessage(msg.category, DataMessageStanza.ADAPTER.encodedSize(msg)
    已把本应用进程标记为 persistent（被杀自动重启）
    ```
 
-## 编译（GitHub Actions）
+## 编译与发布（GitHub Actions）
 
-push 后自动构建，Actions → 最新一次 `build` → Artifacts → `gcmwatch-debug.zip`。
+- push 到 `main`：只构建，产物在 Actions 的 Artifacts 里（`gcmwatch-debug.zip`）
+- push 一个 `v*` tag：构建后自动创建 Release，并把 APK 作为附件上传（说明文字取 `RELEASE_NOTES.md`）
+
+```bash
+git tag -a v1.3 -m "GcmWatch v1.3" && git push origin refs/tags/v1.3
+```
+
 
 ## 使用
 
