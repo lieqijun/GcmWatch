@@ -17,29 +17,35 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
 public class MainActivity extends Activity {
 
+    private static final String KEEPALIVE_PATH = "/data/adb/service.d/99-gcmwatch.sh";
+
     private TextView tvRoot;
     private TextView tvStatus;
+    private TextView tvLog;
     private Button btnPerm;
     private Button btnToggle;
     private Button btnScan;
+    private Button btnTest;
+    private Button btnCheck;
+    private Button btnKeep;
     private LinearLayout llApps;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private SharedPreferences sp;
 
-    private final Runnable statusTick = new Runnable() {
+    private final Runnable tick = new Runnable() {
         @Override
         public void run() {
             boolean running = sp.getBoolean("running", false);
             String status = sp.getString("status", "未启动");
-            tvStatus.setText((running ? "【运行中】" : "【已停止】") + status);
+            tvStatus.setText((running ? "【运行中】 " : "【已停止】 ") + status);
             btnToggle.setText(running ? "停止监听" : "开始监听");
+            tvLog.setText(Diag.dump());
             ui.postDelayed(this, 1000);
         }
     };
@@ -52,15 +58,21 @@ public class MainActivity extends Activity {
 
         tvRoot = findViewById(R.id.tvRoot);
         tvStatus = findViewById(R.id.tvStatus);
+        tvLog = findViewById(R.id.tvLog);
         btnPerm = findViewById(R.id.btnPerm);
         btnToggle = findViewById(R.id.btnToggle);
         btnScan = findViewById(R.id.btnScan);
+        btnTest = findViewById(R.id.btnTest);
+        btnCheck = findViewById(R.id.btnCheck);
+        btnKeep = findViewById(R.id.btnKeep);
         llApps = findViewById(R.id.llApps);
 
         btnPerm.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                askNotificationPermission();
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 42);
+                }
             }
         });
 
@@ -68,10 +80,12 @@ public class MainActivity extends Activity {
             @Override
             public void onClick(View v) {
                 if (sp.getBoolean("running", false)) {
+                    WatchJob.cancel(MainActivity.this);
                     stopService(new Intent(MainActivity.this, WatchService.class));
                 } else {
-                    Intent i = new Intent(MainActivity.this, WatchService.class);
-                    startForegroundService(i);
+                    startForegroundService(new Intent(MainActivity.this, WatchService.class));
+                    WatchJob.schedule(MainActivity.this);
+                    Diag.add(MainActivity.this, "开始监听，已排 JobScheduler 兜底");
                 }
             }
         });
@@ -83,15 +97,36 @@ public class MainActivity extends Activity {
             }
         });
 
+        btnTest.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                WatchService.testNotification(MainActivity.this);
+            }
+        });
+
+        btnCheck.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                Intent i = new Intent(MainActivity.this, WatchService.class);
+                i.setAction(WatchService.ACT_POLL);
+                startForegroundService(i);
+                Toast.makeText(MainActivity.this, "已请求立即检查", Toast.LENGTH_SHORT).show();
+            }
+        });
+
+        btnKeep.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                installKeepAlive();
+            }
+        });
+
         checkRoot();
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
-                    != PackageManager.PERMISSION_GRANTED) {
-                btnPerm.setVisibility(View.VISIBLE);
-            } else {
-                btnPerm.setVisibility(View.GONE);
-            }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+            btnPerm.setVisibility(View.VISIBLE);
         } else {
             btnPerm.setVisibility(View.GONE);
         }
@@ -100,19 +135,13 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        ui.post(statusTick);
+        ui.post(tick);
     }
 
     @Override
     protected void onPause() {
         super.onPause();
-        ui.removeCallbacks(statusTick);
-    }
-
-    private void askNotificationPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 42);
-        }
+        ui.removeCallbacks(tick);
     }
 
     @Override
@@ -121,6 +150,7 @@ public class MainActivity extends Activity {
         if (requestCode == 42 && grantResults.length > 0
                 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
             btnPerm.setVisibility(View.GONE);
+            Diag.add(this, "通知权限已授予");
         }
     }
 
@@ -134,9 +164,9 @@ public class MainActivity extends Activity {
                     @Override
                     public void run() {
                         if (!ok) {
-                            tvRoot.setText("root：未授权（点了「读取列表」会弹 su 授权框）");
+                            tvRoot.setText("root：未授权（点「读取应用列表」会弹 su）");
                         } else if (!db) {
-                            tvRoot.setText("root：已授权 · 但找不到 microG 的 gcmstatus 数据库");
+                            tvRoot.setText("root：已授权 · 找不到 gcmstatus 数据库");
                         } else {
                             tvRoot.setText("root：已授权 · microG 数据库正常");
                         }
@@ -146,10 +176,47 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    private void installKeepAlive() {
+        btnKeep.setEnabled(false);
+        Toast.makeText(this, "正在写入…（会弹 su）", Toast.LENGTH_SHORT).show();
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final String script =
+                        "#!/system/bin/sh\n"
+                                + "# GcmWatch 保活看门狗（由 app 写入，Magisk service.d）\n"
+                                + "(\n"
+                                + "  sleep 20\n"
+                                + "  while true; do\n"
+                                + "    if ! pidof com.gcmwatch >/dev/null 2>&1; then\n"
+                                + "      am start-foreground-service -n com.gcmwatch/.WatchService"
+                                + " >/dev/null 2>&1\n"
+                                + "      sleep 5\n"
+                                + "      am startservice -n com.gcmwatch/.WatchService >/dev/null 2>&1\n"
+                                + "    fi\n"
+                                + "    sleep 60\n"
+                                + "  done\n"
+                                + ") &\n";
+                final String err = RootShell.writeRootText(KEEPALIVE_PATH, script);
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        btnKeep.setEnabled(true);
+                        String msg = err == null
+                                ? "已写入 " + KEEPALIVE_PATH + "，重启后生效"
+                                : err;
+                        Diag.add(MainActivity.this, "写保活脚本: " + msg);
+                        Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show();
+                    }
+                });
+            }
+        }).start();
+    }
+
     private void scan() {
         btnScan.setEnabled(false);
         llApps.removeAllViews();
-        Toast.makeText(this, "读取中…（会弹 su 授权）", Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, "读取中…（会弹 su）", Toast.LENGTH_SHORT).show();
 
         new Thread(new Runnable() {
             @Override
@@ -168,9 +235,12 @@ public class MainActivity extends Activity {
                     public void run() {
                         btnScan.setEnabled(true);
                         if (fError != null) {
-                            Toast.makeText(MainActivity.this, "失败：" + fError, Toast.LENGTH_LONG).show();
+                            Diag.add(MainActivity.this, "读取列表失败: " + fError);
+                            Toast.makeText(MainActivity.this, "失败：" + fError,
+                                    Toast.LENGTH_LONG).show();
                             return;
                         }
+                        Diag.add(MainActivity.this, "读取列表成功，" + fRows.size() + " 个应用");
                         fillApps(fRows);
                     }
                 });
@@ -182,7 +252,7 @@ public class MainActivity extends Activity {
         llApps.removeAllViews();
         if (rows == null || rows.isEmpty()) {
             TextView tv = new TextView(this);
-            tv.setText("数据库里没有任何应用记录。说明 microG 还没收到过任何推送。");
+            tv.setText("数据库里没有应用记录。说明 microG 至今没收到过任何推送。");
             llApps.addView(tv);
             return;
         }
@@ -192,7 +262,8 @@ public class MainActivity extends Activity {
         for (final GcmDb.Row row : rows) {
             CheckBox cb = new CheckBox(this);
             String label = WatchService.appLabel(this, row.pkg);
-            cb.setText(label + "  (" + row.pkg + ")\n已收 " + row.count + " 条 / " + row.bytes + " 字节");
+            cb.setText(label + "  (" + row.pkg + ")\n已收 " + row.count + " 条 / "
+                    + row.bytes + " 字节");
             cb.setTextSize(14f);
             cb.setChecked(watching.contains(row.pkg));
             cb.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
@@ -205,6 +276,7 @@ public class MainActivity extends Activity {
                         cur.remove(row.pkg);
                     }
                     WatchService.setWatching(MainActivity.this, cur);
+                    Diag.add(MainActivity.this, (isChecked ? "监听 " : "取消监听 ") + row.pkg);
                 }
             });
             llApps.addView(cb);

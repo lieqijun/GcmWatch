@@ -10,17 +10,26 @@ android {
         applicationId "com.gcmwatch"
         minSdk 26
         targetSdk 34
-        versionCode 1
-        versionName "1.0"
+        versionCode 2
+        versionName "1.1"
+        // 只保留中文资源，去掉 AAPT 带入的其他语言
+        resourceConfigurations += ['zh']
     }
 
     buildTypes {
         debug {
-            minifyEnabled false
+            // 用 R8 把 debug 包也压一遍：只保留真正用到的类，顺带删掉没引用的资源
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'),
+                    'proguard-rules.pro'
         }
         release {
-            minifyEnabled false
-            // 不签名，只用 debug 包
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'),
+                    'proguard-rules.pro'
+            // 不配置签名，只用 debug 包
         }
     }
 

@@ -27,8 +27,10 @@ public class WatchService extends Service {
     static final String CH_FG = "fg";
     static final String CH_MSG = "msg";
     static final int FG_ID = 1001;
-    static final long POLL_MS = 12000L;
+    static final long POLL_MS = 8000L;   // 8 秒一次，stat 很便宜
     static final String DEFAULT_WATCH = "com.tencent.mm";
+
+    static final String ACT_POLL = "com.gcmwatch.POLL_NOW";
 
     private Handler handler;
     private SharedPreferences sp;
@@ -42,7 +44,7 @@ public class WatchService extends Service {
         sp = getSharedPreferences(PREF, MODE_PRIVATE);
         createChannels();
         handler = new Handler(Looper.getMainLooper());
-        // 轮到后台线程跑：poll() 里面要 fork su、拷文件、开数据库，不能占主线程
+        // fork su / 拷文件 / 开数据库都不能占主线程
         loop = new Runnable() {
             @Override
             public void run() {
@@ -56,6 +58,7 @@ public class WatchService extends Service {
                             poll();
                         } catch (Throwable e) {
                             setStatus("出错: " + e.getMessage());
+                            Diag.add(WatchService.this, "poll 异常: " + e);
                         }
                         handler.postDelayed(WatchService.this.loop, POLL_MS);
                     }
@@ -68,10 +71,17 @@ public class WatchService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        String action = intent == null ? null : intent.getAction();
         sp.edit().putBoolean("running", true).apply();
         startAsForeground();
+
         if (!running) {
             running = true;
+            Diag.add(this, "服务启动，开始轮询");
+            handler.post(loop);
+        } else if (ACT_POLL.equals(action)) {
+            // 手动「立即检查」，把排队的下一轮提前到现在
+            handler.removeCallbacks(loop);
             handler.post(loop);
         }
         return START_STICKY;
@@ -84,6 +94,7 @@ public class WatchService extends Service {
             handler.removeCallbacks(loop);
         }
         sp.edit().putBoolean("running", false).putString("status", "已停止").apply();
+        Diag.add(this, "服务被销毁");
         super.onDestroy();
     }
 
@@ -97,13 +108,13 @@ public class WatchService extends Service {
     private void poll() {
         String stamp = GcmDb.stamp();
         if (stamp.length() == 0) {
-            setStatus("读不到 microG 数据库：su 被拒绝，或 microG 未安装 / 路径不同");
+            setStatus("读不到 microG 数据库：su 被拒绝，或路径不同");
             return;
         }
 
         boolean initialized = sp.getBoolean("init", false);
         if (initialized && stamp.equals(sp.getString("stamp", ""))) {
-            return; // 没有任何写入，跳过
+            return; // 数据库没被写过，跳过
         }
 
         List<GcmDb.Row> rows;
@@ -120,12 +131,23 @@ public class WatchService extends Service {
 
         for (GcmDb.Row row : rows) {
             long oldCount = sp.getLong("c:" + row.pkg, -1);
-            if (initialized && watching.contains(row.pkg) && oldCount >= 0 && row.count > oldCount) {
-                long delta = row.count - oldCount;
-                notifyMessage(row.pkg, delta, row.count);
-                notified++;
+            boolean watched = watching.contains(row.pkg);
+
+            if (initialized && watched) {
+                if (oldCount < 0) {
+                    // 基线建立时这个应用还没有记录（此前零推送），现在第一条来了。
+                    // 旧代码要求 oldCount >= 0，导致首条永远不通知，这里修掉。
+                    notifyMessage(row.pkg, Math.max(row.count, 1), row.count);
+                    notified++;
+                    Diag.add(this, "首次通知 " + row.pkg + " count=" + row.count);
+                } else if (row.count > oldCount) {
+                    notifyMessage(row.pkg, row.count - oldCount, row.count);
+                    notified++;
+                    Diag.add(this, "通知 " + row.pkg + " " + oldCount + "->" + row.count);
+                }
             }
-            // 只向上更新，避免 WAL 回退导致基线被拉低后重复通知
+
+            // 只向上更新，避免快照回退导致基线被拉低后重复通知
             if (row.count > oldCount) {
                 ed.putLong("c:" + row.pkg, row.count);
             }
@@ -137,11 +159,27 @@ public class WatchService extends Service {
         ed.apply();
 
         String time = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
-        String base = "监听中 · " + rows.size() + " 个应用 · 检查于 " + time;
+
+        // 把正在监听的应用当前计数直接显示出来，方便一眼判断「计数到底涨没涨」
+        StringBuilder counts = new StringBuilder();
+        for (GcmDb.Row row : rows) {
+            if (watching.contains(row.pkg)) {
+                counts.append(row.pkg.substring(row.pkg.lastIndexOf('.') + 1))
+                        .append('=').append(row.count).append(' ');
+            }
+        }
+
+        String base;
         if (!initialized) {
-            base = "基线已建立（" + rows.size() + " 个应用）· 之后新增的推送才会通知";
+            base = "基线已建立（" + rows.size() + " 个应用）· 之后的推送才通知";
+            Diag.add(this, "建立基线，rows=" + rows.size() + " watching=" + watching);
         } else if (notified > 0) {
             base = "刚收到 " + notified + " 个应用的新消息 · " + time;
+        } else {
+            base = "监听中 · " + time;
+        }
+        if (counts.length() > 0) {
+            base = base + " · " + counts.toString().trim();
         }
         setStatus(base);
     }
@@ -149,20 +187,7 @@ public class WatchService extends Service {
     // ---------------- 通知 ----------------
 
     private void createChannels() {
-        NotificationManager nm = getSystemService(NotificationManager.class);
-        if (nm == null) {
-            return;
-        }
-        NotificationChannel fg = new NotificationChannel(CH_FG, "后台监听", NotificationManager.IMPORTANCE_MIN);
-        fg.setDescription("常驻通知，表示监听服务在运行");
-        fg.setShowBadge(false);
-        nm.createNotificationChannel(fg);
-
-        NotificationChannel msg = new NotificationChannel(CH_MSG, "新消息提醒", NotificationManager.IMPORTANCE_HIGH);
-        msg.setDescription("microG 收到目标应用的新推送时提醒");
-        msg.enableVibration(true);
-        msg.setShowBadge(true);
-        nm.createNotificationChannel(msg);
+        createChannelsStatic(this);
     }
 
     private void startAsForeground() {
@@ -204,6 +229,7 @@ public class WatchService extends Service {
     private void notifyMessage(String pkg, long delta, long total) {
         NotificationManager nm = getSystemService(NotificationManager.class);
         if (nm == null) {
+            Diag.add(this, "notify 失败: NotificationManager 为空");
             return;
         }
         String label = appLabel(this, pkg);
@@ -221,7 +247,8 @@ public class WatchService extends Service {
                 .setSmallIcon(R.drawable.ic_launcher)
                 .setContentTitle(label + "：" + text)
                 .setContentText("累计 " + total + " 条 · " + pkg)
-                .setStyle(new Notification.BigTextStyle().bigText(text + "（累计 " + total + " 条）"))
+                .setStyle(new Notification.BigTextStyle()
+                        .bigText(text + "（累计 " + total + " 条）"))
                 .setAutoCancel(true)
                 .setWhen(System.currentTimeMillis())
                 .setShowWhen(true);
@@ -230,9 +257,50 @@ public class WatchService extends Service {
         }
         try {
             nm.notify(20000 + (Math.abs(pkg.hashCode()) % 10000), b.build());
-        } catch (Throwable ignored) {
-            // 没有通知权限
+        } catch (Throwable t) {
+            Diag.add(this, "notify 抛异常: " + t);
         }
+    }
+
+    /** 「测试通知」：不依赖 microG、不依赖 root，纯粹验证通知通道 */
+    static void testNotification(Context ctx) {
+        NotificationManager nm = ctx.getSystemService(NotificationManager.class);
+        if (nm == null) {
+            Diag.add(ctx, "测试通知失败: NotificationManager 为空");
+            return;
+        }
+        createChannelsStatic(ctx);
+        Notification.Builder b = new Notification.Builder(ctx, CH_MSG)
+                .setSmallIcon(R.drawable.ic_launcher)
+                .setContentTitle("测试通知：通道正常")
+                .setContentText("看到这条说明通知权限和通知渠道都没问题")
+                .setStyle(new Notification.BigTextStyle()
+                        .bigText("测试能弹、真实消息不弹 → 问题在计数读取，不在通知。"))
+                .setAutoCancel(true)
+                .setWhen(System.currentTimeMillis())
+                .setShowWhen(true);
+        try {
+            nm.notify(29999, b.build());
+            Diag.add(ctx, "已发送测试通知");
+        } catch (Throwable t) {
+            Diag.add(ctx, "测试通知抛异常: " + t);
+        }
+    }
+
+    static void createChannelsStatic(Context ctx) {
+        NotificationManager nm = ctx.getSystemService(NotificationManager.class);
+        if (nm == null) {
+            return;
+        }
+        NotificationChannel fg = new NotificationChannel(CH_FG, "后台监听",
+                NotificationManager.IMPORTANCE_MIN);
+        fg.setShowBadge(false);
+        nm.createNotificationChannel(fg);
+        NotificationChannel msg = new NotificationChannel(CH_MSG, "新消息提醒",
+                NotificationManager.IMPORTANCE_HIGH);
+        msg.enableVibration(true);
+        msg.setShowBadge(true);
+        nm.createNotificationChannel(msg);
     }
 
     static String appLabel(Context ctx, String pkg) {

@@ -54,8 +54,30 @@ final class GcmDb {
     /**
      * 拷贝数据库到 app 自己的缓存目录再查询。
      * 必须用 cat 走 stdout，而不是 cp：cp 过来的文件带着别的 SELinux 标签，本进程读不了。
+     *
+     * 抓快照时如果正好撞上 microG 写入，-wal 可能拿到半截内容，查询会失败。
+     * 所以失败就重抓重试 3 次，而不是去删 -wal（删了会把未合并的数据丢掉）。
      */
     static List<Row> read(Context ctx) throws Exception {
+        Exception last = null;
+        for (int attempt = 0; attempt < 3; attempt++) {
+            try {
+                return readOnce(ctx);
+            } catch (Exception e) {
+                last = e;
+                Diag.add(ctx, "db 读取第 " + (attempt + 1) + " 次失败: " + e.getMessage());
+                try {
+                    Thread.sleep(150);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
+        throw last == null ? new Exception("未知错误") : last;
+    }
+
+    private static List<Row> readOnce(Context ctx) throws Exception {
         File dir = new File(ctx.getCacheDir(), "gcmdb");
         if (!dir.exists() && !dir.mkdirs()) {
             throw new Exception("无法创建缓存目录");
@@ -65,29 +87,26 @@ final class GcmDb {
         File wal = new File(dir, "gcmstatus-wal");
         File shm = new File(dir, "gcmstatus-shm");
 
-        boolean gotMain = RootShell.pullTo(DB_PATH, main);
-        if (!gotMain) {
+        // 每次都清空旧的 -wal/-shm，避免上一次的残留和这次的主库不匹配
+        //noinspection ResultOfMethodCallIgnored
+        wal.delete();
+        //noinspection ResultOfMethodCallIgnored
+        shm.delete();
+
+        if (!RootShell.pullTo(DB_PATH, main)) {
             throw new Exception("读不到 " + DB_PATH + "（root 未授权？路径不对？）");
         }
         boolean gotWal = RootShell.pullTo(DB_PATH + "-wal", wal);
-        RootShell.pullTo(DB_PATH + "-shm", shm);
+        boolean gotShm = RootShell.pullTo(DB_PATH + "-shm", shm);
 
-        try {
-            return query(main);
-        } catch (Throwable first) {
-            // 抓 WAL 时如果正好撞上写入，快照可能不完整，退回只读主库
-            if (gotWal) {
-                //noinspection ResultOfMethodCallIgnored
-                wal.delete();
-                //noinspection ResultOfMethodCallIgnored
-                shm.delete();
-                try {
-                    return query(main);
-                } catch (Throwable ignored) {
-                }
-            }
-            throw new Exception("数据库解析失败: " + first);
+        if (!gotWal || !gotShm) {
+            // 只有主库也能查，但没有 WAL 会漏掉最近的写入
+            //noinspection ResultOfMethodCallIgnored
+            wal.delete();
+            //noinspection ResultOfMethodCallIgnored
+            shm.delete();
         }
+        return query(main);
     }
 
     private static List<Row> query(File dbFile) {
