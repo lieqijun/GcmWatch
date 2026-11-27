@@ -37,6 +37,9 @@ final class GcmDb {
 
     private static final String[] DB_NAMES = {"gcmstatus", "gcmstatus.db"};
 
+    /** microG 的 GcmDatabase 走 Context.getDatabasePath()，只有 CE 这一处，实测 DE 里没有 */
+    private static final String BASE = "/data/data";
+
     /** 探测到的库路径，进程内缓存 */
     private static String cachedPath;
 
@@ -54,14 +57,14 @@ final class GcmDb {
             return cachedPath;
         }
 
-        // 兜底：换个包名 / 文件名再找（各发行版可能改包名）
+        // 兜底：换包名 / 文件名再找（各发行版可能改包名）
         // 命令末尾一定要有 true：最后一条 [ -f ] 失败会把整条命令的退出码变成 1，
         // 而命中行已经打在 stdout 里了，不该因为退出码被丢掉。
         StringBuilder cmd = new StringBuilder();
         for (String pkg : PKGS) {
             for (String name : DB_NAMES) {
-                cmd.append("[ -f '/data/data/").append(pkg).append("/databases/").append(name)
-                        .append("' ] && echo '").append(pkg).append('/').append(name).append("'; ");
+                String p = BASE + "/" + pkg + "/databases/" + name;
+                cmd.append("[ -f '").append(p).append("' ] && echo '").append(p).append("'; ");
             }
         }
         cmd.append("true");
@@ -80,9 +83,8 @@ final class GcmDb {
                 break;
             }
         }
-        if (best != null) {
-            cachedPath = "/data/data/" + best;
-        }
+        // 注意：没找到时不要缓存 null，下次调用会重新探测（microG 可能刚建库）
+        cachedPath = best;
         return cachedPath;
     }
 
@@ -117,6 +119,7 @@ final class GcmDb {
      */
     static String diagnose() {
         StringBuilder sb = new StringBuilder();
+        RootShell.resetProbe();
         RootShell.Result id = RootShell.run("id");
         boolean root = id.ok() && id.text().contains("uid=0");
         if (!root) {
@@ -138,26 +141,56 @@ final class GcmDb {
         }
         sb.append("root：已授权");
 
+        // 每次诊断都重新探一遍：microG 刚建库时，缓存的旧结论会挡住新文件
+        cachedPath = null;
         String p = path();
         if (p != null) {
-            sb.append(" · 数据库 ").append(p.replace("/data/data/", ""));
+            sb.append(" · 数据库 ").append(p);
             return sb.toString();
         }
 
-        cachedPath = null;
-        sb.append(" · 没找到 gcmstatus\n下面是各包 databases 目录：");
+        // 逐包看两件事：包在不在、databases 目录里有什么。
+        // 不再把「包在、但 databases 目录还没建」误报成「无此包」。
+        sb.append(" · 没找到 gcmstatus");
         for (String pkg : PKGS) {
-            RootShell.Result r = RootShell.run(
-                    "ls '/data/data/" + pkg + "/databases' 2>&1 | tr '\\n' ' '");
-            String ls = oneLine(r.text());
-            if (ls.contains("No such file")) {
-                ls = "（无此包）";
-            } else if (ls.trim().isEmpty()) {
-                ls = "（空）";
+            String[] parts = look(pkg);
+            if (parts.length < 3) {
+                continue;
             }
-            sb.append("\n").append(pkg).append("：").append(clip(ls, 90));
+            if (oneLine(parts[1]).contains("No such file")) {
+                continue;   // 没装的包不占屏
+            }
+            sb.append("\n").append(pkg).append("：").append(listing(parts[2]));
         }
         return sb.toString();
+    }
+
+    /** 分段落的分隔符，ls 的输出里不会出现 */
+    private static final String SEP = "@#@";
+
+    /**
+     * 一条 su 里把「包目录 / databases 目录」都看一遍，避免多次弹授权。
+     * 返回数组：[0]=第一个分隔符前的空串、[1]=包目录、[2]=databases
+     */
+    private static String[] look(String pkg) {
+        StringBuilder cmd = new StringBuilder();
+        cmd.append("echo '").append(SEP).append("'; ls -d '").append(BASE).append('/')
+                .append(pkg).append("' 2>&1; ");
+        cmd.append("echo '").append(SEP).append("'; ls '").append(BASE).append('/')
+                .append(pkg).append("/databases' 2>&1; ");
+        cmd.append("true");
+        return RootShell.run(cmd.toString()).text().split(SEP);
+    }
+
+    private static String listing(String raw) {
+        String s = oneLine(raw);
+        if (s.isEmpty()) {
+            return "（有目录，但是空的）";
+        }
+        if (s.contains("No such file")) {
+            return "（没有 databases 目录）";
+        }
+        return clip(s, 110);
     }
 
     /**

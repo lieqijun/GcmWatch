@@ -202,7 +202,9 @@ public class MainActivity extends Activity {
                         tvRoot.setText(text);
                         if (text.startsWith("root：已授权")) {
                             rootRetry = 0;
-                            if (text.contains("gcmstatus") && sp.getBoolean("running", false)) {
+                            // 只在真的找到库时才触发一次立即检查；
+                            // 没找到时文本里也有 "gcmstatus" 字样，别再拿它当判据
+                            if (text.contains(" · 数据库 ") && sp.getBoolean("running", false)) {
                                 // root 刚接通：让服务马上按新路径重建一次基线
                                 Intent i = new Intent(MainActivity.this, WatchService.class);
                                 i.setAction(WatchService.ACT_POLL);

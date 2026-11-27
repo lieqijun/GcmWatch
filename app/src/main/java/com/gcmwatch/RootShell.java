@@ -57,7 +57,56 @@ final class RootShell {
     private RootShell() {
     }
 
+    /**
+     * 执行一条 root 命令。
+     *
+     * 关键：Android 11 起每个 app 进程都在自己的 mount namespace 里，
+     * /data/data、/data/user、/data/user_de 都被 tmpfs 盖住，只把本 app 自己的目录
+     * bind 回来。su 是在 app 进程里 fork 的，**继承的正是 app 的 namespace**，
+     * 所以哪怕 uid=0，`ls /data/data/com.google.android.gms/...` 也只能得到
+     * No such file or directory —— 路径在这个 namespace 里根本不存在。
+     *
+     * 所以先用 nsenter 切到 init(PID 1) 的 mount namespace 再跑，才是真的全局视角。
+     * 探不到 nsenter 的机器（老系统 / su 不给 CAP_SYS_ADMIN）自动退回原样执行。
+     */
     static Result run(String cmd) {
+        return execRaw(wrap(cmd));
+    }
+
+    private static final String PROBE = "GCMWATCH_NSPROBE";
+
+    /** null = 还没探测过 */
+    private static Boolean needNs;
+
+    private static boolean needNs() {
+        if (needNs != null) {
+            return needNs;
+        }
+        Result plain = execRaw("echo " + PROBE);
+        if (!plain.ok() || !plain.text().contains(PROBE)) {
+            // su 本身不通，由 diagnose() 去报「未授权」，这里不做判断
+            needNs = Boolean.FALSE;
+            return needNs;
+        }
+        Result ns = execRaw("nsenter -t 1 -m -- echo " + PROBE);
+        needNs = ns.ok() && ns.text().contains(PROBE);
+        return needNs;
+    }
+
+    /** 让下一次 run() 重新探测 nsenter：用户点顶部那行重测时用，避免一次探失败就永久降级 */
+    static void resetProbe() {
+        needNs = null;
+    }
+
+    private static String wrap(String cmd) {
+        if (!needNs()) {
+            return cmd;
+        }
+        // toybox 的 nsenter 需要显式给 shell，否则分号、管道都没人解释
+        return "nsenter -t 1 -m -- /system/bin/sh -c " + sq(cmd);
+    }
+
+    private static Result execRaw(String cmd) {
         Result last = null;
         for (String binary : SU_CANDIDATES) {
             Result r = runOnce(binary, cmd);

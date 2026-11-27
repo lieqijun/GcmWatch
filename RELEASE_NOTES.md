@@ -1,49 +1,43 @@
-## v1.6：su 被藏起来了，不是没 root
+## v1.7：root 是好的，是命名空间把它挡住了
 
-你截图里的报错是关键证据：
+v1.6 在两个错误方向上打转（su 被 DenyList 藏、库在 DE 分区），这版是实测定位出来的。
 
-```
-root：未授权 · java.io.IOException: Cannot run program
-"/debug_ramdisk/su": error=2, No such file or directory
-```
+### 根因
 
-`error=2` = 文件不存在。代码是依次试 `su` / `/system/bin/su` / `/debug_ramdisk/su` / `/system/xbin/su` / `/sbin/su`，全部 ENOENT 才会报出最后一个。**也就是说这个 app 进程里，一个 su 都看不见。**
-
-Magisk 里已经勾了本应用授权（另一张截图），所以不是授权问题，也不是没装 root。
-
-### 最可能的原因（推断，下面有验证方法）
-
-Zygisk 的「强制执行拒绝列表 / Enforce DenyList」一旦对本应用生效，会在该进程里 **unmount 掉 Magisk 的挂载**，`/system/bin/su` 就从它的文件系统里消失了。
-
-你说的时间顺序也能对上：**先弄好 LSPosed（模块启用，本应用进程被 Zygisk 注入）→ 再给 root，就读不到了。**
-
-### 这版能帮你确认
-
-界面现在会多一行，直接告诉你那三个文件在**本进程里**看不看得见：
+Android 给每个应用进程建了独立的 mount namespace，把别的 app 的数据目录用 tmpfs 盖住：
 
 ```
-su 文件：/system/bin/su 无  /debug_ramdisk/su 无  /system/xbin/su 无
+/ /data/data      tmpfs mode=751     ← 整个目录被盖成空的
+/ /data/user      tmpfs mode=751
+/ /data/user_de   tmpfs mode=751
+/data/com.gcmwatch  /data/data/com.gcmwatch   ← 只把它自己的 bind 回来
 ```
 
-- 三个都是「无」+ Magisk 里确实给了授权 → 就是被 unmount 藏起来了
-- 有一个「有」但还报错 → 那是 exec 权限问题，另一回事
+`su` 是从本 app 进程里 fork 出来的，**继承的就是这个 namespace**。所以哪怕返回 `uid=0`，
+`ls /data/data/com.google.android.gms/databases` 也只能得到 `No such file or directory`
+—— 这个路径在它的视角里根本不存在。
 
-同时加了兜底：`/data/adb/magisk/su`、`/data/adb/ap/bin/su`、`/data/adb/ksu/bin/su`，以及借 `/system/bin/sh` 用 PATH 再找一次 su。
+实测对照（同一台机器、同一个 pid）：
 
-### 你可以先试这两步
+| 命令 | 结果 |
+|---|---|
+| `ls /data/data/com.google.android.gms/databases` | `No such file or directory` |
+| `nsenter -t 1 -m -- ls /data/data/com.google.android.gms/databases` | `gcmstatus`、`gcmstatus-wal`、`exposure.db`… |
 
-1. **Magisk → 设置 → 关掉「强制执行拒绝列表（Enforce DenyList）」**；如果「配置拒绝列表」里勾了「GCM 消息监听」，取消勾选
-2. 然后**强制停止本应用**（设置 → 应用 → 强制停止，不必重启手机），再打开
+### 这版改了什么
 
-如果关掉之后那行变成「已授权」，就说明是 deny 列表干的。
+- `RootShell.run()` 先 `nsenter -t 1 -m -- /system/bin/sh -c '...'` 切到 init 的 namespace 再执行
+- 首次调用自动探测 su 与 nsenter 是否可用，探不到就**原样退回旧行为**，不引入新故障
+- 诊断文本：找到库时显示**完整路径**；找不到时逐包显示「包在不在 / databases 里有什么」，
+  不再把「包装了但 databases 目录还没建」报成「无此包」
+- 删掉 v1.6 加的 DE（`/data/user_de/0`）探测 —— 实测那台机器 DE 下根本没有 `databases` 目录，
+  库就在 CE，多探两个位置纯属噪音
 
-极端的确认方式：LSPosed 里临时停用本模块 → 重启 → 看 root 是否恢复。恢复就说明是模块注入导致的，那再决定是保活优先还是读库优先。
+### 装完怎么验
 
-## 安装后
-
-1. 打开 app，顶部第一行看 root 状态，第二行看 su 文件有/无
-2. 有 root 后点「读取应用列表」→ 勾微信 → 「开始监听」
-3. **第一条不会响**，首次运行只建基线
+1. 点顶部那行，应显示 `root：已授权 · 数据库 /data/data/com.google.android.gms/databases/gcmstatus`
+2. 点「申请通知权限」并允许（v1.6 及之前 `POST_NOTIFICATIONS` 是关的，计数涨了也不会弹）
+3. 点「读取应用列表」，应能看到 `com.tencent.mm` 已注册、`已收 N 条`
 
 ## 原理
 
